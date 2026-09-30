@@ -4,7 +4,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "cd src && node index.js"
+    "start": "cd src && node index.js",
+    "test": "jest"
   },
   "license": "MIT",
   "dependencies": {
@@ -12,5 +13,18 @@
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.9.7"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jmdav/jwt-pizza-service.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/jmdav/jwt-pizza-service/issues"
+  },
+  "homepage": "https://github.com/jmdav/jwt-pizza-service#readme",
+  "devDependencies": {
+    "jest": "^30.5.2"
   }
 }
