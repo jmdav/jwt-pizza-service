@@ -1,5 +1,5 @@
 const express = require('express');
-const { asyncHandler } = require('../endpointHelper.js');
+const { asyncHandler, StatusCodeError } = require('../endpointHelper.js');
 const { DB, Role } = require('../database/database.js');
 const { authRouter, setAuth } = require('./authRouter.js');
 
@@ -11,16 +11,16 @@ userRouter.docs = [
     path: '/api/user?page=1&limit=10&name=*',
     requiresAuth: true,
     description: 'Gets a list of users',
-    example: `curl -X GET localhost:3000/api/user -H 'Authorization: Bearer tttttt'`,
+    example: `curl 'localhost:3000/api/user?page=1&limit=10&name=*' -H 'Authorization: Bearer tttttt'`,
     response: {
       users: [
         {
           id: 1,
           name: '常用名字',
           email: 'a@jwt.com',
-          roles: [{ role: 'admin' }],
         },
       ],
+      more: true,
     },
   },
   {
@@ -82,7 +82,32 @@ userRouter.get(
   '/',
   authRouter.authenticateToken,
   asyncHandler(async (req, res) => {
-    res.json({});
+    const parsePositiveInteger = (value, defaultValue, parameter) => {
+      if (value === undefined) return defaultValue;
+      if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) {
+        throw new StatusCodeError(`${parameter} must be a positive integer`, 400);
+      }
+
+      const parsedValue = Number(value);
+      if (!Number.isSafeInteger(parsedValue)) {
+        throw new StatusCodeError(`${parameter} must be a positive integer`, 400);
+      }
+      return parsedValue;
+    };
+
+    const page = parsePositiveInteger(req.query.page, 1, 'page');
+    const limit = parsePositiveInteger(req.query.limit, 10, 'limit');
+    if (limit > 100) {
+      throw new StatusCodeError('limit cannot be greater than 100', 400);
+    }
+
+    const name = req.query.name ?? '*';
+    if (typeof name !== 'string') {
+      throw new StatusCodeError('name must be a string', 400);
+    }
+
+    const result = await DB.getUsers(page, limit, name);
+    res.json(result);
   }),
 );
 

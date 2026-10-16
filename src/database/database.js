@@ -75,6 +75,24 @@ class DB {
     }
   }
 
+  async getUsers(page = 1, limit = 10, nameFilter = '*') {
+    const connection = await this.getConnection();
+    try {
+      const offset = (page - 1) * limit;
+      const filter = nameFilter.replace(/\*/g, '%');
+      const rows = await this.query(
+        connection,
+        `SELECT id, name, email FROM user WHERE name LIKE ? ORDER BY id LIMIT ? OFFSET ?`,
+        [filter, limit + 1, offset]
+      );
+
+      const more = rows.length > limit;
+      return { users: more ? rows.slice(0, limit) : rows, more };
+    } finally {
+      connection.end();
+    }
+  }
+
   async updateUser(userId, name, email, password) {
     const connection = await this.getConnection();
     try {
