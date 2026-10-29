@@ -107,3 +107,25 @@ test('franchise management requires authentication', async () => {
   expect(response.status).toBe(401);
   expect(response.body).toEqual({ message: 'unauthorized' });
 });
+
+test('deleting a franchise requires authentication', async () => {
+  const response = await request(app).delete('/api/franchise/0');
+  expect(response.status).toBe(401);
+});
+
+test('a diner cannot delete a franchise', async () => {
+  const diner = await DB.addUser({
+    name: `${testName}-diner`,
+    email: `${testName}-diner@test.com`,
+    password,
+    roles: [{ role: Role.Diner }],
+  });
+  userIds.push(diner.id);
+  const login = await request(app).put('/api/auth').send({ email: diner.email, password });
+  expect(login.status).toBe(200);
+
+  const response = await request(app)
+    .delete('/api/franchise/0')
+    .set('Authorization', `Bearer ${login.body.token}`);
+  expect(response.status).toBe(403);
+});
