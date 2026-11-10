@@ -1,5 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const { randomUUID } = require('crypto');
 const config = require('../config.js');
 const { asyncHandler } = require('../endpointHelper.js');
 const { DB, Role } = require('../database/database.js');
@@ -93,7 +94,7 @@ authRouter.delete(
 );
 
 async function setAuth(user) {
-  const token = jwt.sign(user, config.jwtSecret);
+  const token = jwt.sign(user, config.jwtSecret, { jwtid: randomUUID() });
   await DB.loginUser(user.id, token);
   return token;
 }
