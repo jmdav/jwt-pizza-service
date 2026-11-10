@@ -3,6 +3,7 @@ const config = require('../config.js');
 const { Role, DB } = require('../database/database.js');
 const { authRouter } = require('./authRouter.js');
 const { asyncHandler, StatusCodeError } = require('../endpointHelper.js');
+const { trackPurchase, recordFactoryLatency } = require('../metrics.js');
 
 const orderRouter = express.Router();
 
@@ -75,17 +76,25 @@ orderRouter.get(
 // createOrder
 orderRouter.post(
   '/',
+  trackPurchase,
   authRouter.authenticateToken,
   asyncHandler(async (req, res) => {
     const orderReq = req.body;
     const order = await DB.addDinerOrder(req.user, orderReq);
-    const r = await fetch(`${config.factory.url}/api/order`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${config.factory.apiKey}` },
-      body: JSON.stringify({ diner: { id: req.user.id, name: req.user.name, email: req.user.email }, order }),
-    });
+    const factoryStart = process.hrtime.bigint();
+    let r;
+    try {
+      r = await fetch(`${config.factory.url}/api/order`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', authorization: `Bearer ${config.factory.apiKey}` },
+        body: JSON.stringify({ diner: { id: req.user.id, name: req.user.name, email: req.user.email }, order }),
+      });
+    } finally {
+      recordFactoryLatency(Number(process.hrtime.bigint() - factoryStart) / 1e9);
+    }
     const j = await r.json();
     if (r.ok) {
+      res.locals.purchaseRevenue = order.items.reduce((total, item) => total + Number(item.price), 0);
       res.send({ order, followLinkToEndChaos: j.reportUrl, jwt: j.jwt });
     } else {
       res.status(500).send({ message: 'Failed to fulfill order at factory', followLinkToEndChaos: j.reportUrl });
