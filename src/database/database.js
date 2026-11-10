@@ -159,6 +159,16 @@ class DB {
     }
   }
 
+  async getLoggedInUserCount() {
+    const connection = await this.getConnection();
+    try {
+      const [row] = await this.query(connection, 'SELECT COUNT(DISTINCT userId) AS count FROM auth');
+      return Number(row.count);
+    } finally {
+      await connection.end();
+    }
+  }
+
   async logoutUser(token) {
     token = this.getTokenSignature(token);
     const connection = await this.getConnection();

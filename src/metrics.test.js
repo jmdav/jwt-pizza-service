@@ -2,6 +2,7 @@ const { EventEmitter } = require('events');
 const os = require('os');
 
 jest.mock('./config', () => ({ metrics: { source: 'test', endpointUrl: 'https://example.test/v1/metrics', accountId: '123', apiKey: 'secret' } }));
+jest.mock('./database/database', () => ({ DB: { getLoggedInUserCount: jest.fn() } }));
 
 const originalFetch = global.fetch;
 let metrics;
@@ -9,6 +10,7 @@ let metrics;
 beforeEach(() => {
   jest.useFakeTimers();
   jest.resetModules();
+  require('./database/database').DB.getLoggedInUserCount.mockResolvedValue(1);
   global.fetch = jest.fn().mockResolvedValue({ ok: true });
   // Each sample represents 50% CPU usage and 25% memory usage.
   let tick = 0;
@@ -70,7 +72,7 @@ test('exports outcomes, successful revenue, request duration, and system average
   expect(exported['system.memory.usage'].gauge.dataPoints[0].asDouble).toBe(25);
 });
 
-test('keeps counters and histograms cumulative but resets active users between reports', async () => {
+test('keeps counters and histograms cumulative and counts idle logged-in users', async () => {
   const req = { method: 'GET', baseUrl: '/api/user', route: { path: '/:id' }, user: { id: 42 } };
   for (let i = 0; i < 2; i++) {
     const res = response(200);
@@ -91,7 +93,28 @@ test('keeps counters and histograms cumulative but resets active users between r
   expect(histogram.bucketCounts).toEqual(['1', '1', '0', '0', '0', '0', '0', '0', '0', '0', '0', '1']);
   expect(histogram.count).toBe('3');
   expect(first['users.active'].gauge.dataPoints[0].asInt).toBe('1');
-  expect(second['users.active'].gauge.dataPoints[0].asInt).toBe('0');
+  expect(second['users.active'].gauge.dataPoints[0].asInt).toBe('1');
+});
+
+test('refreshes the logged-in user count every report without requiring requests', async () => {
+  const count = require('./database/database').DB.getLoggedInUserCount;
+  count.mockResolvedValueOnce(0).mockResolvedValueOnce(2).mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+  for (const expected of ['0', '2', '1', '0']) {
+    const exported = await report();
+    expect(exported['users.active'].gauge.dataPoints[0].asInt).toBe(expected);
+  }
+  expect(count).toHaveBeenCalledTimes(4);
+});
+
+test('omits the user gauge on a database failure and continues exporting other metrics', async () => {
+  const error = new Error('database unavailable');
+  require('./database/database').DB.getLoggedInUserCount.mockRejectedValueOnce(error);
+  const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+  const exported = await report();
+  expect(exported['users.active']).toBeUndefined();
+  expect(exported['pizza.purchases']).toBeDefined();
+  expect(log).toHaveBeenCalledWith('Error counting logged-in users:', error);
+  expect((await report())['users.active'].gauge.dataPoints[0].asInt).toBe('1');
 });
 
 test('does not count a request before finish and groups unmatched URLs', async () => {

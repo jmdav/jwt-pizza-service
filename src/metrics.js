@@ -1,5 +1,6 @@
 const config = require('./config').metrics || {};
 const os = require('os');
+const { DB } = require('./database/database');
 
 // Counters and histograms are cumulative for the lifetime of this process.
 const startedAt = unixNano();
@@ -10,8 +11,7 @@ const purchases = { success: 0, failed: 0 };
 const authAttempts = { success: 0, failed: 0 };
 let revenue = 0;
 
-// These gauges describe activity during the latest reporting interval.
-const activeUsers = new Set();
+// System gauges describe the latest reporting interval.
 let previousCpu;
 let cpuSum = 0;
 let memorySum = 0;
@@ -62,7 +62,6 @@ function requestTracker(req, res, next) {
     const endpoint = `[${req.method}] ${route}`;
     requests.set(endpoint, (requests.get(endpoint) || 0) + 1);
     recordLatency('http.server.request.duration', endpoint, Number(process.hrtime.bigint() - start) / 1e9);
-    if (req.user?.id != null) activeUsers.add(req.user.id);
   });
   next();
 }
@@ -134,8 +133,14 @@ async function sendMetrics() {
       explicitBounds: bounds,
     }, { endpoint: series.endpoint });
   }
-  addMetric('users.active', '1', 'gauge', { asInt: String(activeUsers.size) });
-  activeUsers.clear();
+  try {
+    // Count people, rather than sessions: one user may have multiple tokens.
+    const loggedInUsers = await DB.getLoggedInUserCount();
+    addMetric('users.active', '1', 'gauge', { asInt: String(loggedInUsers) });
+  } catch (error) {
+    // A failed query must not report a misleading zero or block other metrics.
+    console.error('Error counting logged-in users:', error);
+  }
   if (samples) {
     addMetric('system.memory.usage', '%', 'gauge', { asDouble: memorySum / samples });
     addMetric('system.cpu.usage', '%', 'gauge', { asDouble: cpuSum / samples });
