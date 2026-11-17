@@ -31,17 +31,55 @@ logger.sendLogToGrafana = async (event) => {
     });
     if (!response.ok) throw new Error(`HTTP status: ${response.status}`);
   } catch (error) {
-    console.error('Error pushing HTTP log:', error);
+    console.error('Error pushing log:', error);
   }
 };
 
 function redact(value) {
   if (value == null) return null;
   return JSON.parse(JSON.stringify(value, (key, item) => {
-    if (/^(password|token|accessToken|refreshToken|authorization|apiKey|secret)$/i.test(key)) return '[REDACTED]';
+    if (/^(password|token|jwt|accessToken|refreshToken|authorization|apiKey|secret)$/i.test(key)) return '[REDACTED]';
     return item;
   }));
 }
+
+function safeLog(level, type, data) {
+  if (!config.logging?.endpointUrl) return;
+  try {
+    logger.log(level, type, redact(data));
+  } catch (error) {
+    console.error(`Error creating ${type} log:`, error);
+  }
+}
+
+logger.factoryLogger = ({ user, error, ...data }) => {
+  safeLog(error ? 'error' : logger.statusToLogLevel(data.statusCode), 'factory', {
+    ...data,
+    user: user ? { id: user.id, name: user.name, email: user.email, roles: user.roles } : null,
+    ...(error ? { error: { message: error.message, stack: error.stack } } : {}),
+  });
+};
+
+logger.unhandledErrorLogger = (error, context = {}) => {
+  safeLog('error', 'unhandledError', {
+    ...context,
+    message: error?.message ?? String(error),
+    stack: error?.stack,
+    statusCode: error?.statusCode ?? 500,
+  });
+};
+
+let processErrorLoggingInstalled = false;
+logger.installProcessErrorLogging = () => {
+  if (processErrorLoggingInstalled) return;
+  processErrorLoggingInstalled = true;
+  // Observe fatal errors (including default unhandled rejections) without
+  // suppressing Node's normal crash. stderr survives a failed remote push.
+  process.on('uncaughtExceptionMonitor', (error, origin) => {
+    console.error('Unhandled process error:', error);
+    logger.unhandledErrorLogger(error, { origin });
+  });
+};
 
 // Observe completed responses, including res.end(), parser errors, and 404s.
 logger.httpLogger = (req, res, next) => {
