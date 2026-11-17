@@ -4,6 +4,7 @@ const config = require('../config.js');
 const { StatusCodeError } = require('../endpointHelper.js');
 const { Role } = require('../model/model.js');
 const dbModel = require('./dbModel.js');
+const logger = require('../logger.js');
 class DB {
   constructor() {
     this.initialized = this.initializeDatabase();
@@ -342,13 +343,14 @@ class DB {
     return '';
   }
 
-  async query(connection, sql, params) {
-    const [results] = await connection.execute(sql, params);
+  async query(connection, sql, params, method = 'execute') {
+    logger.dbLogger(sql);
+    const [results] = await connection[method](sql, params);
     return results;
   }
 
   async getID(connection, key, value, table) {
-    const [rows] = await connection.execute(`SELECT id FROM ${table} WHERE ${key}=?`, [value]);
+    const rows = await this.query(connection, `SELECT id FROM ${table} WHERE ${key}=?`, [value]);
     if (rows.length > 0) {
       return rows[0].id;
     }
@@ -370,7 +372,7 @@ class DB {
       decimalNumbers: true,
     });
     if (setUse) {
-      await connection.query(`USE ${config.db.connection.database}`);
+      await this.query(connection, `USE ${config.db.connection.database}`, undefined, 'query');
     }
     return connection;
   }
@@ -382,15 +384,15 @@ class DB {
         const dbExists = await this.checkDatabaseExists(connection);
         console.log(dbExists ? 'Database exists' : 'Database does not exist, creating it');
 
-        await connection.query(`CREATE DATABASE IF NOT EXISTS ${config.db.connection.database}`);
-        await connection.query(`USE ${config.db.connection.database}`);
+        await this.query(connection, `CREATE DATABASE IF NOT EXISTS ${config.db.connection.database}`, undefined, 'query');
+        await this.query(connection, `USE ${config.db.connection.database}`, undefined, 'query');
 
         if (!dbExists) {
           console.log('Successfully created database');
         }
 
         for (const statement of dbModel.tableCreateStatements) {
-          await connection.query(statement);
+          await this.query(connection, statement, undefined, 'query');
         }
 
         if (!dbExists) {
@@ -406,7 +408,7 @@ class DB {
   }
 
   async checkDatabaseExists(connection) {
-    const [rows] = await connection.execute(`SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?`, [config.db.connection.database]);
+    const rows = await this.query(connection, `SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?`, [config.db.connection.database]);
     return rows.length > 0;
   }
 }

@@ -3,6 +3,16 @@ const config = require('./config.js');
 
 const logger = new Logger(config);
 
+// Keep bound parameters (including passwords and session tokens) out of logs.
+logger.dbLogger = (sql) => {
+  if (!config.logging?.endpointUrl) return;
+  try {
+    logger.log('info', 'db', sql);
+  } catch (error) {
+    console.error('Error creating database log:', error);
+  }
+};
+
 // Send directly to Loki: the package's default transport also contacts the
 // factory and evaluates its response as JavaScript.
 logger.sendLogToGrafana = async (event) => {
