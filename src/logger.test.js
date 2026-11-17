@@ -62,13 +62,50 @@ test('logs rejected route handlers as errors', async () => {
   expect(JSON.parse(event.streams[0].values[0][1]).path).toBe('/api/order/menu');
 });
 
-test('omits credentials, bodies, and query strings', async () => {
-  await request(app).post('/api/auth?token=query-secret').send({ password: 'body-secret' });
+test('includes bodies while redacting credentials and omitting query strings', async () => {
+  await request(app).post('/api/auth?token=query-secret').send({ password: 'body-secret', name: 'diner' });
   const body = global.fetch.mock.calls[0][1].body;
   expect(body).not.toContain('query-secret');
   expect(body).not.toContain('body-secret');
-  expect(body).not.toContain('reqBody');
-  expect(body).not.toContain('resBody');
+  const entry = JSON.parse(JSON.parse(body).streams[0].values[0][1]);
+  expect(entry.reqBody).toEqual({ password: '[REDACTED]', name: 'diner' });
+  expect(entry.resBody).toEqual({ message: 'name, email, and password are required' });
+  expect(entry.user).toBeNull();
+  expect(entry.authorized).toBe(false);
+});
+
+test('includes the authenticated user and redacts nested response credentials', async () => {
+  const express = require('express');
+  const service = express();
+  service.use(logger.httpLogger);
+  service.use(express.json());
+  service.post('/example', (req, res) => {
+    req.user = { id: 42, name: 'diner', email: 'd@example.test', roles: [{ role: 'diner' }], password: 'user-secret' };
+    res.json({ user: req.user, token: 'response-secret', items: [{ apiKey: 'nested-secret', count: 2 }] });
+  });
+  const response = await request(service).post('/example').set('Authorization', 'Bearer header-secret').send({ items: ['pizza'] });
+  expect(response.body.token).toBe('response-secret');
+  const body = global.fetch.mock.calls[0][1].body;
+  for (const secret of ['user-secret', 'response-secret', 'nested-secret', 'header-secret']) expect(body).not.toContain(secret);
+  const entry = JSON.parse(JSON.parse(body).streams[0].values[0][1]);
+  expect(entry.authorized).toBe(true);
+  expect(entry.user).toEqual({ id: 42, name: 'diner', email: 'd@example.test', roles: [{ role: 'diner' }] });
+  expect(entry.reqBody).toEqual({ items: ['pizza'] });
+  expect(entry.resBody.token).toBe('[REDACTED]');
+  expect(entry.resBody.items).toEqual([{ apiKey: '[REDACTED]', count: 2 }]);
+});
+
+test('captures streamed text without changing the response', async () => {
+  const express = require('express');
+  const service = express();
+  service.use(logger.httpLogger);
+  service.get('/', (_req, res) => {
+    res.write('hello ');
+    res.end('world');
+  });
+  expect((await request(service).get('/')).text).toBe('hello world');
+  const entry = JSON.parse(JSON.parse(global.fetch.mock.calls[0][1].body).streams[0].values[0][1]);
+  expect(entry.resBody).toBe('hello world');
 });
 
 test.each([
