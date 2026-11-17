@@ -124,7 +124,8 @@ test('a diner can retrieve their orders', async () => {
 test('a diner can create an order and send it to the factory', async () => {
   global.fetch = jest.fn().mockResolvedValue({
     ok: true,
-    json: async () => ({ reportUrl: 'https://factory.test/report', jwt: 'factory-test-jwt' }),
+    status: 200,
+    text: async () => JSON.stringify({ reportUrl: 'https://factory.test/report', jwt: 'factory-test-jwt' }),
   });
 
   const response = await request(app)
