@@ -4,6 +4,7 @@ const { Role, DB } = require('../database/database.js');
 const { authRouter } = require('./authRouter.js');
 const { asyncHandler, StatusCodeError } = require('../endpointHelper.js');
 const { trackPurchase, recordFactoryLatency } = require('../metrics.js');
+const logger = require('../logger.js');
 
 const orderRouter = express.Router();
 
@@ -82,17 +83,40 @@ orderRouter.post(
     const orderReq = req.body;
     const order = await DB.addDinerOrder(req.user, orderReq);
     const factoryStart = process.hrtime.bigint();
+    const factoryUrl = `${config.factory.url}/api/order`;
+    const factoryBody = { diner: { id: req.user.id, name: req.user.name, email: req.user.email }, order };
     let r;
+    let j;
+    let factoryResponseBody = null;
+    let factoryError;
     try {
-      r = await fetch(`${config.factory.url}/api/order`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', authorization: `Bearer ${config.factory.apiKey}` },
-        body: JSON.stringify({ diner: { id: req.user.id, name: req.user.name, email: req.user.email }, order }),
-      });
+      try {
+        r = await fetch(factoryUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', authorization: `Bearer ${config.factory.apiKey}` },
+          body: JSON.stringify(factoryBody),
+        });
+      } finally {
+        recordFactoryLatency(Number(process.hrtime.bigint() - factoryStart) / 1e9);
+      }
+      // Read once so even a non-JSON factory response can be logged.
+      factoryResponseBody = await r.text();
+      j = JSON.parse(factoryResponseBody);
+      factoryResponseBody = j;
+    } catch (error) {
+      factoryError = error;
+      throw error;
     } finally {
-      recordFactoryLatency(Number(process.hrtime.bigint() - factoryStart) / 1e9);
+      logger.factoryLogger({
+        url: factoryUrl,
+        method: 'POST',
+        statusCode: r?.status ?? null,
+        user: req.user,
+        reqBody: factoryBody,
+        resBody: factoryResponseBody,
+        error: factoryError,
+      });
     }
-    const j = await r.json();
     if (r.ok) {
       res.locals.purchaseRevenue = order.items.reduce((total, item) => total + Number(item.price), 0);
       res.send({ order, followLinkToEndChaos: j.reportUrl, jwt: j.jwt });
