@@ -6,7 +6,11 @@ jest.mock('./config.js', () => ({
   db: { connection: { host: 'localhost' } },
   logging: { source: 'test', endpointUrl: 'https://logs.example.test/loki/api/v1/push', accountId: '123', apiKey: 'secret' },
 }));
-jest.mock('./database/database.js', () => ({ DB: { getMenu: jest.fn() }, Role: {} }));
+jest.mock('./database/database.js', () => ({ DB: { getMenu: jest.fn(), isLoggedIn: jest.fn(), addDinerOrder: jest.fn() }, Role: {} }));
+jest.mock('./metrics.js', () => {
+  const metrics = jest.requireActual('./metrics.js');
+  return { ...metrics, recordFactoryLatency: jest.fn(metrics.recordFactoryLatency) };
+});
 
 const app = require('./service.js');
 const logger = require('./logger.js');
@@ -50,14 +54,20 @@ test.each([
 test('logs parser errors before routing', async () => {
   const response = await request(app).post('/api/auth').set('Content-Type', 'application/json').send('{');
   expect(response.status).toBe(400);
-  expect(global.fetch).toHaveBeenCalledTimes(1);
+  const events = global.fetch.mock.calls.map(([, options]) => JSON.parse(options.body).streams[0]);
+  expect(events.map(({ stream }) => stream.type)).toEqual(['unhandledError', 'http']);
+  expect(JSON.parse(events[0].values[0][1])).toMatchObject({ statusCode: 400, method: 'POST', path: '/api/auth' });
 });
 
 test('logs rejected route handlers as errors', async () => {
   DB.getMenu.mockRejectedValueOnce(new Error('database unavailable'));
   const response = await request(app).get('/api/order/menu');
   expect(response.status).toBe(500);
-  const event = JSON.parse(global.fetch.mock.calls[0][1].body);
+  const events = global.fetch.mock.calls.map(([, options]) => JSON.parse(options.body).streams[0]);
+  expect(events.filter(({ stream }) => stream.type === 'unhandledError')).toHaveLength(1);
+  const errorEntry = JSON.parse(events.find(({ stream }) => stream.type === 'unhandledError').values[0][1]);
+  expect(errorEntry).toMatchObject({ message: 'database unavailable', stack: expect.stringContaining('database unavailable'), method: 'GET', path: '/api/order/menu' });
+  const event = { streams: [events.find(({ stream }) => stream.type === 'http')] };
   expect(event.streams[0].stream.level).toBe('error');
   expect(JSON.parse(event.streams[0].values[0][1]).path).toBe('/api/order/menu');
 });
@@ -115,7 +125,7 @@ test.each([
   const log = jest.spyOn(console, 'error').mockImplementation(() => {});
   global.fetch.mockImplementationOnce(fail);
   await logger.sendLogToGrafana({ streams: [] });
-  expect(log).toHaveBeenCalledWith('Error pushing HTTP log:', expect.any(Error));
+  expect(log).toHaveBeenCalledWith('Error pushing log:', expect.any(Error));
   expect((await request(app).get('/')).status).toBe(200);
 });
 
@@ -126,6 +136,8 @@ test('skips logging when configuration is absent', async () => {
     expect((await request(app).get('/')).status).toBe(200);
     await logger.sendLogToGrafana({ streams: [] });
     logger.dbLogger('SELECT 1');
+    logger.factoryLogger({ reqBody: {}, resBody: {} });
+    logger.unhandledErrorLogger(new Error('disabled logging'));
     expect(global.fetch).not.toHaveBeenCalled();
   } finally {
     config.logging = logging;
@@ -147,4 +159,78 @@ test('contains database log formatting failures', () => {
   const error = jest.spyOn(console, 'error').mockImplementation(() => {});
   expect(() => logger.dbLogger('SELECT 1')).not.toThrow();
   expect(error).toHaveBeenCalledWith('Error creating database log:', expect.any(Error));
+});
+
+test.each([
+  ['success', 200, { reportUrl: 'https://factory.test/report', jwt: 'factory-secret' }, 200, 'info'],
+  ['factory failure', 503, { reportUrl: 'https://factory.test/report', message: 'oven offline' }, 500, 'error'],
+  ['invalid JSON', 502, '<html>bad gateway</html>', 500, 'error'],
+  ['network failure', null, null, 500, 'error'],
+])('logs factory %s with user and bodies without changing the response', async (_name, status, body, serviceStatus, level) => {
+  const jwt = require('jsonwebtoken');
+  const metrics = require('./metrics.js');
+  const user = { id: 42, name: 'diner', email: 'd@example.test', roles: [{ role: 'diner' }] };
+  const token = jwt.sign(user, config.jwtSecret);
+  const order = { id: 7, items: [{ menuId: 1, price: 2 }] };
+  DB.isLoggedIn.mockResolvedValueOnce(true);
+  DB.addDinerOrder.mockResolvedValueOnce(order);
+  global.fetch.mockImplementation(async (url) => {
+    if (url === config.logging.endpointUrl) return { ok: true };
+    if (status === null) throw new Error('factory offline');
+    return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+  });
+
+  metrics.recordFactoryLatency.mockClear();
+  const response = await request(app).post('/api/order').set('Authorization', `Bearer ${token}`).send({ items: order.items });
+  expect(response.status).toBe(serviceStatus);
+  if (status === 200) expect(response.body).toMatchObject({ order, jwt: 'factory-secret', followLinkToEndChaos: body.reportUrl });
+  if (status === 503) expect(response.body).toEqual({ message: 'Failed to fulfill order at factory', followLinkToEndChaos: body.reportUrl });
+  const factoryCall = global.fetch.mock.calls.find(([url]) => url !== config.logging.endpointUrl);
+  expect(factoryCall[0]).toBe(`${config.factory.url}/api/order`);
+  expect(JSON.parse(factoryCall[1].body)).toEqual({ diner: { id: user.id, name: user.name, email: user.email }, order });
+  const logs = global.fetch.mock.calls.filter(([url]) => url === config.logging.endpointUrl).map(([, options]) => JSON.parse(options.body).streams[0]);
+  const factoryLogs = logs.filter(({ stream }) => stream.type === 'factory');
+  expect(factoryLogs).toHaveLength(1);
+  expect(factoryLogs[0].stream.level).toBe(level);
+  const entry = JSON.parse(factoryLogs[0].values[0][1]);
+  expect(entry).toMatchObject({ user, method: 'POST', statusCode: status, reqBody: JSON.parse(factoryCall[1].body) });
+  expect(entry.resBody).toEqual(status === 200 ? { ...body, jwt: '[REDACTED]' } : body);
+  if (status === null || typeof body === 'string') expect(entry.error).toMatchObject({ message: expect.any(String), stack: expect.any(String) });
+  const exported = JSON.stringify(logs);
+  expect(exported).not.toContain('factory-secret');
+  expect(exported).not.toContain(token);
+  expect(metrics.recordFactoryLatency).toHaveBeenCalledTimes(1);
+  expect(metrics.recordFactoryLatency).toHaveBeenCalledWith(expect.any(Number));
+});
+
+test('factory logging supports unauthenticated callers and contains formatter failures', () => {
+  logger.factoryLogger({ statusCode: 200, reqBody: {}, resBody: {} });
+  const event = JSON.parse(global.fetch.mock.calls[0][1].body).streams[0];
+  expect(JSON.parse(event.values[0][1]).user).toBeNull();
+  jest.spyOn(logger, 'log').mockImplementation(() => { throw new Error('formatter failed'); });
+  jest.spyOn(console, 'error').mockImplementation(() => {});
+  expect(() => logger.factoryLogger({ statusCode: 200 })).not.toThrow();
+  expect(() => logger.unhandledErrorLogger(new Error('route failed'))).not.toThrow();
+});
+
+test.each([
+  ['exception', "setImmediate(() => { throw new Error('fatal test'); });", 'uncaughtException'],
+  ['rejection', "Promise.reject(new Error('fatal test'));", 'unhandledRejection'],
+])('logs fatal %s once while preserving the process failure', (_name, trigger, origin) => {
+  const { spawnSync } = require('node:child_process');
+  const child = spawnSync(process.execPath, ['--unhandled-rejections=throw', '-e', `
+    const configPath = require.resolve('./src/config.js');
+    require.cache[configPath] = { exports: { logging: { source: 'test', endpointUrl: 'https://unused.test' } } };
+    const logger = require('./src/logger.js');
+    logger.sendLogToGrafana = (event) => require('node:fs').writeSync(1, JSON.stringify(event));
+    logger.installProcessErrorLogging();
+    logger.installProcessErrorLogging();
+    ${trigger}
+  `], { cwd: require('node:path').resolve(__dirname, '..'), encoding: 'utf8', timeout: 5000 });
+  expect(child.error).toBeUndefined();
+  expect(child.status).toBe(1);
+  expect(child.stderr).toContain('fatal test');
+  const event = JSON.parse(child.stdout).streams[0];
+  expect(event.stream).toMatchObject({ type: 'unhandledError', level: 'error' });
+  expect(JSON.parse(event.values[0][1])).toMatchObject({ message: 'fatal test', stack: expect.stringContaining('fatal test'), origin });
 });
