@@ -52,8 +52,9 @@ app.use('*', (req, res) => {
 
 // Default error handler for all exceptions and errors.
 app.use((err, req, res, next) => {
+  logger.unhandledErrorLogger(err, { method: req.method, path: req.originalUrl.split('?')[0] });
+  if (res.headersSent) return next(err);
   res.status(err.statusCode ?? 500).json({ message: err.message, stack: err.stack });
-  next();
 });
 
 module.exports = app;
