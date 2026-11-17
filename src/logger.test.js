@@ -125,8 +125,26 @@ test('skips logging when configuration is absent', async () => {
   try {
     expect((await request(app).get('/')).status).toBe(200);
     await logger.sendLogToGrafana({ streams: [] });
+    logger.dbLogger('SELECT 1');
     expect(global.fetch).not.toHaveBeenCalled();
   } finally {
     config.logging = logging;
   }
+});
+
+test('formats database logs for the same direct Grafana transport', () => {
+  logger.dbLogger('SELECT id FROM user WHERE email=?');
+  expect(global.fetch).toHaveBeenCalledTimes(1);
+  const [url, options] = global.fetch.mock.calls[0];
+  expect(url).toBe(config.logging.endpointUrl);
+  const { stream, values } = JSON.parse(options.body).streams[0];
+  expect(stream).toEqual({ component: 'test', level: 'info', type: 'db' });
+  expect(JSON.parse(values[0][1])).toBe('SELECT id FROM user WHERE email=?');
+});
+
+test('contains database log formatting failures', () => {
+  jest.spyOn(logger, 'log').mockImplementationOnce(() => { throw new Error('logging failed'); });
+  const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+  expect(() => logger.dbLogger('SELECT 1')).not.toThrow();
+  expect(error).toHaveBeenCalledWith('Error creating database log:', expect.any(Error));
 });
